@@ -1,0 +1,6 @@
+flask 
+flask-cors 
+pycryptodome 
+opencv-python 
+numpy 
+pillow 
