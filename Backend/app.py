@@ -41,18 +41,14 @@ def embed():
         img = cv2.imread(path)
         h, w, c = img.shape
 
-        # HEADER: Signature 'STG' + Koordinat X (4 digit) + Koordinat Y (4 digit)
-        # Contoh: STG01200080 -> Mulai di X=120, Y=80
+        # HEADER: Signature 'STG' + Coord X(4d) + Coord Y(4d)
         header_text = f"STG{str(x_s).zfill(4)}{str(y_s).zfill(4)}"
-        secret_hex = encrypt_chacha(msg, key) + "54474f" # 54474f = TGO (End)
-        
-        # Gabungkan Header (Plain) + Data (Encrypted)
+        secret_hex = encrypt_chacha(msg, key) + "54474f" 
         full_hex = header_text.encode().hex() + secret_hex
         bin_msg = bin(int(full_hex, 16))[2:].zfill(len(full_hex) * 4)
 
         res_img = img.copy()
         idx = 0
-        # Selalu mulai sisipkan HEADER dari 0,0 agar Auto-Scan bisa nemu
         for y in range(h):
             for x in range(w):
                 for k in range(c):
@@ -65,7 +61,11 @@ def embed():
 
         fname = f"stego_{uuid.uuid4().hex[:6]}.png"
         cv2.imwrite(os.path.join(UPLOAD_FOLDER, fname), res_img)
-        return jsonify({'psnr': f"{cv2.PSNR(img, res_img):.2f}", 'url': f"http://localhost:5000/download/{fname}", 'used_pixels': len(bin_msg)//3})
+        return jsonify({
+            'psnr': f"{cv2.PSNR(img, res_img):.2f}", 
+            'url': f"http://localhost:5000/download/{fname}", 
+            'used_pixels': len(bin_msg)//3
+        })
     except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/extract', methods=['POST'])
@@ -78,40 +78,55 @@ def extract():
         img = cv2.imread(path)
         h, w, c = img.shape
         
-        # Baca 88 bit pertama (STG + 4 digit X + 4 digit Y = 11 karakter * 8 bit)
+        # Scan 8000 bit pertama untuk mencari header
         bits = ""
         idx = 0
         for y in range(h):
             for x in range(w):
                 for k in range(c):
-                    if idx < 5000: # Ambil cukup bit untuk nyari header & data
+                    if idx < 8000:
                         bits += str(img[y, x, k] & 1)
                         idx += 1
                     else: break
-                if idx >= 5000: break
-            if idx >= 5000: break
+                if idx >= 8000: break
+            if idx >= 8000: break
 
-        # Konversi ke Hex
         all_hex = hex(int(bits, 2))[2:]
         if len(all_hex) % 2 != 0: all_hex = '0' + all_hex
         all_bytes = bytes.fromhex(all_hex).decode('utf-8', errors='ignore')
 
         if "STG" not in all_bytes:
-            return jsonify({'error': 'Gambar ini tidak mengandung pesan rahasia!'}), 400
+            return jsonify({'error': 'Signature STG tidak ditemukan!'}), 400
 
-        # Ambil data setelah header STGXXXXXXXX
-        # Header kita 11 karakter: STG(3) + X(4) + Y(4)
         start_idx = all_bytes.find("STG")
-        content_hex = all_hex[(start_idx + 11) * 2:] # Lewati header
+        header_str = all_bytes[start_idx:start_idx+11]
+        f_x, f_y = int(header_str[3:7]), int(header_str[7:11])
+        content_hex = all_hex[(start_idx + 11) * 2:]
         
-        # Potong sampai Delimiter TGO (54474f)
         if "54474f" not in content_hex:
-            return jsonify({'error': 'Data korup atau tidak lengkap.'}), 400
+            return jsonify({'error': 'Data terpotong atau korup.'}), 400
             
         final_hex = content_hex.split("54474f")[0]
-        return jsonify({'message': decrypt_chacha(final_hex, key)})
+        msg_out = decrypt_chacha(final_hex, key)
+
+        # --- VISUAL FORENSIC MAP ---
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        # Highlight lokasi
+        cv2.rectangle(gray, (f_x-10, f_y-10), (f_x+60, f_y+60), (255, 165, 0), 2)
+        cv2.putText(gray, f"DETECTED AT {f_x},{f_y}", (f_x, f_y-20), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 165, 0), 1)
+        
+        map_name = f"map_{uuid.uuid4().hex[:6]}.png"
+        cv2.imwrite(os.path.join(UPLOAD_FOLDER, map_name), gray)
+
+        return jsonify({
+            'message': msg_out,
+            'map_url': f"http://localhost:5000/download/{map_name}",
+            'coord': {'x': f_x, 'y': f_y}
+        })
     except:
-        return jsonify({'error': 'Kunci salah atau data tidak dikenali.'}), 400
+        return jsonify({'error': 'Gagal! Kunci salah atau gambar bukan stego.'}), 400
 
 @app.route('/download/<f>')
 def download(f): return send_from_directory(UPLOAD_FOLDER, f)
